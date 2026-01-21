@@ -25,7 +25,7 @@
     id <MTLDevice> _device;
 
     id <MTLBuffer> _dynamicUniformBuffer[MaxBuffersInFlight];
-    id <MTLBuffer> _perObjectUniformBuffers[MaxBuffersInFlight][6]; // 6 meshes max
+    id <MTLBuffer> _perObjectUniformBuffers[MaxBuffersInFlight][8]; // 8 meshes max (room for expansion)
     id <MTLRenderPipelineState> _pipelineState;
     id <MTLDepthStencilState> _depthState;
     id <MTLTexture> _colorMap;
@@ -157,7 +157,7 @@
         _dynamicUniformBuffer[i].label = @"UniformBuffer";
 
         // Create per-object uniform buffers
-        for(NSUInteger j = 0; j < 6; j++)
+        for(NSUInteger j = 0; j < 8; j++)
         {
             _perObjectUniformBuffers[i][j] = [_device newBufferWithLength:sizeof(Uniforms)
                                                                    options:MTLResourceStorageModeShared];
@@ -216,7 +216,7 @@
         [_residencySet addAllocation:_dynamicUniformBuffer[i]];
 
         // Add per-object buffers to residency set
-        for(NSUInteger j = 0; j < 6; j++)
+        for(NSUInteger j = 0; j < 8; j++)
         {
             [_residencySet addAllocation:_perObjectUniformBuffers[i][j]];
         }
@@ -272,8 +272,12 @@
     _mouseDeltaX = 0.0f;
     _mouseDeltaY = 0.0f;
 
-    // Update player
-    player_update(&_player, (float)deltaTime, moveInput, mouseDelta);
+    // Get collision boxes from world
+    NSUInteger collisionBoxCount = 0;
+    AABB *collisionBoxes = world_get_collision_boxes(&_world, &collisionBoxCount);
+
+    // Update player with collision detection
+    player_update(&_player, (float)deltaTime, moveInput, mouseDelta, collisionBoxes, collisionBoxCount);
 
     // Update uniforms for all meshes
     matrix_float4x4 viewMatrix = camera_view_matrix(_player.camera);
