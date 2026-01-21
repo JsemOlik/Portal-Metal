@@ -14,9 +14,9 @@
 @interface Renderer : NSObject <MTKViewDelegate>
 
 -(nonnull instancetype)initWithMetalKitView:(nonnull MTKView *)view;
-- (void)handleKeyDown:(NSEvent *)event;
-- (void)handleKeyUp:(NSEvent *)event;
-- (void)handleMouseMove:(NSEvent *)event;
+- (void)handleKeyDown:(nonnull NSEvent *)event;
+- (void)handleKeyUp:(nonnull NSEvent *)event;
+- (void)handleMouseMove:(nonnull NSEvent *)event;
+- (void)handleFocusLost;
 
 @end
-

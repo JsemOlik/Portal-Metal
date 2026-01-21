@@ -8,6 +8,7 @@
 #ifndef Player_h
 #define Player_h
 
+#import <Foundation/Foundation.h>
 #import <simd/simd.h>
 #import "Camera.h"
 

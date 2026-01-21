@@ -21,7 +21,7 @@ typedef struct {
     NSUInteger meshCount;
 } World;
 
-World world_create(id<MTLDevice> device);
+World world_create(id<MTLDevice> device, MTLVertexDescriptor *vertexDescriptor);
 void world_release(World *world);
 
 #endif /* World_h */

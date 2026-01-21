@@ -25,6 +25,7 @@
     id <MTLDevice> _device;
 
     id <MTLBuffer> _dynamicUniformBuffer[MaxBuffersInFlight];
+    id <MTLBuffer> _perObjectUniformBuffers[MaxBuffersInFlight][6]; // 6 meshes max
     id <MTLRenderPipelineState> _pipelineState;
     id <MTLDepthStencilState> _depthState;
     id <MTLTexture> _colorMap;
@@ -43,15 +44,17 @@
     id<MTLResidencySet> _residencySet;
     id<MTLSharedEvent> _sharedEvent;
     uint64_t _currentFrameIndex;
-    
+
     // Game systems
     Player _player;
     World _world;
     CFTimeInterval _lastFrameTime;
-    
+
     // Input tracking
     BOOL _keysPressed[256];
-    NSPoint _lastMousePos;
+    float _mouseDeltaX;
+    float _mouseDeltaY;
+    BOOL _mouseTrackingEnabled;
 }
 
 -(nonnull instancetype)initWithMetalKitView:(nonnull MTKView *)view;
@@ -63,17 +66,23 @@
         _inFlightSemaphore = dispatch_semaphore_create(MaxBuffersInFlight);
         [self _loadMetalWithView:view];
         [self _loadAssets];
-        
-        // Initialize player at center of world, 1 unit above ground
-        _player = player_create((vector_float3){0, 1, 0});
-        
+
+        // Initialize player at center of world, at proper eye height above ground
+        // Floor is at y=-10, top surface at y=-9.75, eye height is 1.8, so camera at -9.75 + 1.8 = -7.95
+        _player = player_create((vector_float3){0, -7.95, 0});
+
         // Create the world
-        _world = world_create(_device);
-        
+        _world = world_create(_device, _mtlVertexDescriptor);
+
         // Initialize input tracking
         memset(_keysPressed, 0, sizeof(_keysPressed));
-        _lastMousePos = NSMakePoint(0, 0);
+        _mouseDeltaX = 0.0f;
+        _mouseDeltaY = 0.0f;
+        _mouseTrackingEnabled = NO;
         _lastFrameTime = CFAbsoluteTimeGetCurrent();
+
+        NSLog(@"Player initialized at position: (%.2f, %.2f, %.2f)",
+              _player.camera.position.x, _player.camera.position.y, _player.camera.position.z);
     }
 
     return self;
@@ -146,8 +155,16 @@
                                                         options:MTLResourceStorageModeShared];
 
         _dynamicUniformBuffer[i].label = @"UniformBuffer";
+
+        // Create per-object uniform buffers
+        for(NSUInteger j = 0; j < 6; j++)
+        {
+            _perObjectUniformBuffers[i][j] = [_device newBufferWithLength:sizeof(Uniforms)
+                                                                   options:MTLResourceStorageModeShared];
+            _perObjectUniformBuffers[i][j].label = [NSString stringWithFormat:@"PerObjectUniform[%lu][%lu]", i, j];
+        }
     }
-    
+
     _commandQueue4 = [_device newMTL4CommandQueue];
     _commandBuffer = [_device newCommandBuffer];
     MTL4ArgumentTableDescriptor *atd = [MTL4ArgumentTableDescriptor new];
@@ -161,7 +178,7 @@
         _commandAllocators[i] = [_device newCommandAllocator];
     }
     [_commandQueue4 addResidencySet:_residencySet];
-    
+
     /// Run MaxBuffersInFlight ahead to simplify checking for completed frames
     _currentFrameIndex = MaxBuffersInFlight;
     _sharedEvent = [_device newSharedEvent];
@@ -192,19 +209,25 @@
     {
         NSLog(@"Error creating texture %@", error.localizedDescription);
     }
-    
-    
+
+
     for(NSUInteger i = 0; i < MaxBuffersInFlight; i++)
     {
         [_residencySet addAllocation:_dynamicUniformBuffer[i]];
+
+        // Add per-object buffers to residency set
+        for(NSUInteger j = 0; j < 6; j++)
+        {
+            [_residencySet addAllocation:_perObjectUniformBuffers[i][j]];
+        }
     }
     [_residencySet addAllocation:_colorMap];
-    
+
     // Add world meshes to residency set
     for (NSUInteger i = 0; i < _world.meshCount; i++) {
         WorldMesh worldMesh = _world.meshes[i];
         MTKMesh *mesh = worldMesh.mesh;
-        
+
         for (NSUInteger bufferIndex = 0; bufferIndex < mesh.vertexBuffers.count; bufferIndex++)
         {
             MTKMeshBuffer *vertexBuffer = mesh.vertexBuffers[bufferIndex];
@@ -213,7 +236,7 @@
                 [_residencySet addAllocation:vertexBuffer.buffer];
             }
         }
-        
+
         for(MTKSubmesh *submesh in mesh.submeshes)
         {
             [_residencySet addAllocation:submesh.indexBuffer.buffer];
@@ -225,35 +248,50 @@
 - (void)_updateGameState
 {
     /// Update any game state before encoding rendering commands to our drawable
-    
+
     // Calculate delta time
     CFTimeInterval currentTime = CFAbsoluteTimeGetCurrent();
     CFTimeInterval deltaTime = currentTime - _lastFrameTime;
     _lastFrameTime = currentTime;
-    
+
+    // Cap delta time to prevent huge jumps (which could cause input to stick)
+    if (deltaTime > 0.1) {
+        deltaTime = 0.1;
+    }
+
     // Gather input
     float moveInput[3] = {0, 0, 0};
     if (_keysPressed['w'] || _keysPressed['W']) moveInput[2] += 1.0f;
     if (_keysPressed['s'] || _keysPressed['S']) moveInput[2] -= 1.0f;
     if (_keysPressed['a'] || _keysPressed['A']) moveInput[0] -= 1.0f;
     if (_keysPressed['d'] || _keysPressed['D']) moveInput[0] += 1.0f;
-    
-    float mouseDelta[2] = {0, 0}; // Updated in handleMouseMove
-    
+
+    float mouseDelta[2] = {_mouseDeltaX, _mouseDeltaY};
+
+    // Reset mouse delta after use
+    _mouseDeltaX = 0.0f;
+    _mouseDeltaY = 0.0f;
+
     // Update player
     player_update(&_player, (float)deltaTime, moveInput, mouseDelta);
-    
-    // Update uniforms
-    Uniforms * uniforms = (Uniforms*)_dynamicUniformBuffer[_uniformBufferIndex].contents;
-    uniforms->projectionMatrix = _projectionMatrix;
-    uniforms->modelViewMatrix = camera_view_matrix(_player.camera);
+
+    // Update uniforms for all meshes
+    matrix_float4x4 viewMatrix = camera_view_matrix(_player.camera);
+
+    for (NSUInteger i = 0; i < _world.meshCount; i++) {
+        WorldMesh worldMesh = _world.meshes[i];
+        Uniforms * uniforms = (Uniforms*)_perObjectUniformBuffers[_uniformBufferIndex][i].contents;
+        uniforms->projectionMatrix = _projectionMatrix;
+        uniforms->viewMatrix = viewMatrix;
+        uniforms->modelMatrix = matrix4x4_translation(worldMesh.position.x, worldMesh.position.y, worldMesh.position.z);
+    }
 }
 
 - (void)drawInMTKView:(nonnull MTKView *)view
 {
     /// Per frame updates here
     _uniformBufferIndex = (_uniformBufferIndex + 1) % MaxBuffersInFlight;
-    
+
     /// Wait for previous work to complete to be able to reset and reuse the allocator.
     uint32_t subFrameIndex = _currentFrameIndex % MaxBuffersInFlight;
     id<MTL4CommandAllocator> commandAllocatorForFrame = _commandAllocators[subFrameIndex];
@@ -283,12 +321,12 @@
         for (NSUInteger i = 0; i < _world.meshCount; i++) {
             WorldMesh worldMesh = _world.meshes[i];
             MTKMesh *mesh = worldMesh.mesh;
-            
-            [renderEncoder pushDebugGroup:[NSString stringWithFormat:@"DrawWall%lu", i]];
-            
+
+            [renderEncoder pushDebugGroup:[NSString stringWithFormat:@"DrawMesh%lu", i]];
+
             [renderEncoder setArgumentTable:_argumentTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
-            [_argumentTable setAddress:_dynamicUniformBuffer[_uniformBufferIndex].gpuAddress atIndex:BufferIndexUniforms];
-            
+            [_argumentTable setAddress:_perObjectUniformBuffers[_uniformBufferIndex][i].gpuAddress atIndex:BufferIndexUniforms];
+
             for (NSUInteger bufferIndex = 0; bufferIndex < mesh.vertexBuffers.count; bufferIndex++)
             {
                 MTKMeshBuffer *vertexBuffer = mesh.vertexBuffers[bufferIndex];
@@ -298,7 +336,7 @@
                 }
             }
             [_argumentTable setTexture:_colorMap.gpuResourceID atIndex:TextureIndexColor];
-            
+
             for(MTKSubmesh *submesh in mesh.submeshes)
             {
                 [renderEncoder drawIndexedPrimitives:submesh.primitiveType
@@ -307,7 +345,7 @@
                                           indexBuffer:submesh.indexBuffer.buffer.gpuAddress + submesh.indexBuffer.offset
                                     indexBufferLength:submesh.indexBuffer.buffer.length - submesh.indexBuffer.offset];
             }
-            
+
             [renderEncoder popDebugGroup];
         }
 
@@ -317,15 +355,15 @@
 
         [_commandBuffer useResidencySet:((CAMetalLayer *)view.layer).residencySet];
         [_commandBuffer endCommandBuffer];
-        
+
         id<CAMetalDrawable> drawable = view.currentDrawable;
         [_commandQueue4 waitForDrawable:drawable];
         [_commandQueue4 commit:&_commandBuffer count:1];
-        
+
         uint64_t futureValueToWaitFor = _currentFrameIndex;
         [_commandQueue4 signalEvent:_sharedEvent value:futureValueToWaitFor];
         _currentFrameIndex++;
-        
+
         [_commandQueue4 signalDrawable:drawable];
         [drawable present];
     }
@@ -383,12 +421,29 @@ matrix_float4x4 matrix_perspective_right_hand(float fovyRadians, float aspect, f
 
 - (void)handleKeyDown:(NSEvent *)event
 {
+    // Handle ESC key to release mouse
+    if ([event keyCode] == 53) { // ESC key code
+        if (_mouseTrackingEnabled) {
+            _mouseTrackingEnabled = NO;
+            [NSCursor unhide];
+            CGAssociateMouseAndMouseCursorPosition(YES);
+        }
+        return;
+    }
+
     NSString *chars = [event characters];
     if ([chars length] > 0) {
         unsigned short keyCode = [chars characterAtIndex:0];
         if (keyCode < 256) {
             _keysPressed[keyCode] = YES;
         }
+    }
+
+    // Enable mouse tracking on first key press
+    if (!_mouseTrackingEnabled) {
+        _mouseTrackingEnabled = YES;
+        [NSCursor hide];
+        CGAssociateMouseAndMouseCursorPosition(NO);
     }
 }
 
@@ -403,10 +458,18 @@ matrix_float4x4 matrix_perspective_right_hand(float fovyRadians, float aspect, f
     }
 }
 
+- (void)handleFocusLost
+{
+    // Clear all keys when window loses focus to prevent sticking
+    memset(_keysPressed, 0, sizeof(_keysPressed));
+}
+
 - (void)handleMouseMove:(NSEvent *)event
 {
-    // Mouse delta could be calculated from event location
-    // This is a placeholder - the player update uses {0, 0} for mouse delta
+    if (_mouseTrackingEnabled) {
+        _mouseDeltaX += [event deltaX];
+        _mouseDeltaY -= [event deltaY]; // Invert Y for natural camera movement
+    }
 }
 
 @end

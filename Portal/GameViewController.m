@@ -11,7 +11,6 @@
 @implementation GameViewController
 {
     MTKView *_view;
-
     Renderer *_renderer;
 }
 
@@ -35,9 +34,24 @@
     [_renderer mtkView:_view drawableSizeWillChange:_view.drawableSize];
 
     _view.delegate = _renderer;
-    
-    // Enable key and mouse event tracking
-    [self.view setAcceptsTouchEvents:YES];
+}
+
+- (void)viewDidAppear
+{
+    [super viewDidAppear];
+
+    // Make this view controller the first responder to receive keyboard events
+    [self.view.window makeFirstResponder:self];
+
+    // Enable mouse moved events for the window
+    [self.view.window setAcceptsMouseMovedEvents:YES];
+
+
+}
+
+- (BOOL)acceptsFirstResponder
+{
+    return YES;
 }
 
 - (void)keyDown:(NSEvent *)event
@@ -53,6 +67,24 @@
 - (void)mouseMoved:(NSEvent *)event
 {
     [_renderer handleMouseMove:event];
+}
+
+- (void)mouseDragged:(NSEvent *)event
+{
+    [_renderer handleMouseMove:event];
+}
+
+- (void)mouseDown:(NSEvent *)event
+{
+    // Click to focus and enable mouse capture
+    [self.view.window makeFirstResponder:self];
+}
+
+- (BOOL)resignFirstResponder
+{
+    // Clear all key states when losing focus to prevent sticking
+    [_renderer handleFocusLost];
+    return [super resignFirstResponder];
 }
 
 @end
