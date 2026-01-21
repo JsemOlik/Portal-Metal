@@ -35,6 +35,24 @@
     [_renderer mtkView:_view drawableSizeWillChange:_view.drawableSize];
 
     _view.delegate = _renderer;
+    
+    // Enable key and mouse event tracking
+    [self.view setAcceptsTouchEvents:YES];
+}
+
+- (void)keyDown:(NSEvent *)event
+{
+    [_renderer handleKeyDown:event];
+}
+
+- (void)keyUp:(NSEvent *)event
+{
+    [_renderer handleKeyUp:event];
+}
+
+- (void)mouseMoved:(NSEvent *)event
+{
+    [_renderer handleMouseMove:event];
 }
 
 @end

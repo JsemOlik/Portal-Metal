@@ -9,6 +9,9 @@
 #import <ModelIO/ModelIO.h>
 
 #import "Renderer.h"
+#import "Player.h"
+#import "World.h"
+#import "Camera.h"
 
 // Include header shared between C code here, which executes Metal API commands, and .metal files
 #import "ShaderTypes.h"
@@ -31,9 +34,7 @@
 
     matrix_float4x4 _projectionMatrix;
 
-    float _rotation;
 
-    MTKMesh *_mesh;
 
     id<MTL4CommandQueue> _commandQueue4;
     id<MTL4CommandAllocator> _commandAllocators[MaxBuffersInFlight];
@@ -42,6 +43,15 @@
     id<MTLResidencySet> _residencySet;
     id<MTLSharedEvent> _sharedEvent;
     uint64_t _currentFrameIndex;
+    
+    // Game systems
+    Player _player;
+    World _world;
+    CFTimeInterval _lastFrameTime;
+    
+    // Input tracking
+    BOOL _keysPressed[256];
+    NSPoint _lastMousePos;
 }
 
 -(nonnull instancetype)initWithMetalKitView:(nonnull MTKView *)view;
@@ -53,6 +63,17 @@
         _inFlightSemaphore = dispatch_semaphore_create(MaxBuffersInFlight);
         [self _loadMetalWithView:view];
         [self _loadAssets];
+        
+        // Initialize player at center of world, 1 unit above ground
+        _player = player_create((vector_float3){0, 1, 0});
+        
+        // Create the world
+        _world = world_create(_device);
+        
+        // Initialize input tracking
+        memset(_keysPressed, 0, sizeof(_keysPressed));
+        _lastMousePos = NSMakePoint(0, 0);
+        _lastFrameTime = CFAbsoluteTimeGetCurrent();
     }
 
     return self;
@@ -153,32 +174,6 @@
 
     NSError *error;
 
-    MTKMeshBufferAllocator *metalAllocator = [[MTKMeshBufferAllocator alloc]
-                                              initWithDevice: _device];
-
-    MDLMesh *mdlMesh = [MDLMesh newBoxWithDimensions:(vector_float3){4, 4, 4}
-                                            segments:(vector_uint3){2, 2, 2}
-                                        geometryType:MDLGeometryTypeTriangles
-                                       inwardNormals:NO
-                                           allocator:metalAllocator];
-
-    MDLVertexDescriptor *mdlVertexDescriptor =
-    MTKModelIOVertexDescriptorFromMetal(_mtlVertexDescriptor);
-
-    mdlVertexDescriptor.attributes[VertexAttributePosition].name  = MDLVertexAttributePosition;
-    mdlVertexDescriptor.attributes[VertexAttributeTexcoord].name  = MDLVertexAttributeTextureCoordinate;
-
-    mdlMesh.vertexDescriptor = mdlVertexDescriptor;
-
-    _mesh = [[MTKMesh alloc] initWithMesh:mdlMesh
-                                   device:_device
-                                    error:&error];
-
-    if(!_mesh || error)
-    {
-        NSLog(@"Error creating MetalKit mesh %@", error.localizedDescription);
-    }
-
     MTKTextureLoader* textureLoader = [[MTKTextureLoader alloc] initWithDevice:_device];
 
     NSDictionary *textureLoaderOptions =
@@ -204,37 +199,54 @@
         [_residencySet addAllocation:_dynamicUniformBuffer[i]];
     }
     [_residencySet addAllocation:_colorMap];
-    for (NSUInteger bufferIndex = 0; bufferIndex < _mesh.vertexBuffers.count; bufferIndex++)
-    {
-        MTKMeshBuffer *vertexBuffer = _mesh.vertexBuffers[bufferIndex];
-        if((NSNull*)vertexBuffer != [NSNull null])
-        {
-            [_residencySet addAllocation:vertexBuffer.buffer];
-        }
-    }
     
-    for(MTKSubmesh *submesh in _mesh.submeshes)
-    {
-        [_residencySet addAllocation:submesh.indexBuffer.buffer];
+    // Add world meshes to residency set
+    for (NSUInteger i = 0; i < _world.meshCount; i++) {
+        WorldMesh worldMesh = _world.meshes[i];
+        MTKMesh *mesh = worldMesh.mesh;
+        
+        for (NSUInteger bufferIndex = 0; bufferIndex < mesh.vertexBuffers.count; bufferIndex++)
+        {
+            MTKMeshBuffer *vertexBuffer = mesh.vertexBuffers[bufferIndex];
+            if((NSNull*)vertexBuffer != [NSNull null])
+            {
+                [_residencySet addAllocation:vertexBuffer.buffer];
+            }
+        }
+        
+        for(MTKSubmesh *submesh in mesh.submeshes)
+        {
+            [_residencySet addAllocation:submesh.indexBuffer.buffer];
+        }
     }
     [_residencySet commit];
 }
 
 - (void)_updateGameState
 {
-    /// Update any game state before encoding renderint commands to our drawable
-
+    /// Update any game state before encoding rendering commands to our drawable
+    
+    // Calculate delta time
+    CFTimeInterval currentTime = CFAbsoluteTimeGetCurrent();
+    CFTimeInterval deltaTime = currentTime - _lastFrameTime;
+    _lastFrameTime = currentTime;
+    
+    // Gather input
+    float moveInput[3] = {0, 0, 0};
+    if (_keysPressed['w'] || _keysPressed['W']) moveInput[2] += 1.0f;
+    if (_keysPressed['s'] || _keysPressed['S']) moveInput[2] -= 1.0f;
+    if (_keysPressed['a'] || _keysPressed['A']) moveInput[0] -= 1.0f;
+    if (_keysPressed['d'] || _keysPressed['D']) moveInput[0] += 1.0f;
+    
+    float mouseDelta[2] = {0, 0}; // Updated in handleMouseMove
+    
+    // Update player
+    player_update(&_player, (float)deltaTime, moveInput, mouseDelta);
+    
+    // Update uniforms
     Uniforms * uniforms = (Uniforms*)_dynamicUniformBuffer[_uniformBufferIndex].contents;
-
     uniforms->projectionMatrix = _projectionMatrix;
-
-    vector_float3 rotationAxis = {1, 1, 0};
-    matrix_float4x4 modelMatrix = matrix4x4_rotation(_rotation, rotationAxis);
-    matrix_float4x4 viewMatrix = matrix4x4_translation(0.0, 0.0, -8.0);
-
-    uniforms->modelViewMatrix = matrix_multiply(viewMatrix, modelMatrix);
-
-    _rotation += .01;
+    uniforms->modelViewMatrix = camera_view_matrix(_player.camera);
 }
 
 - (void)drawInMTKView:(nonnull MTKView *)view
@@ -262,37 +274,44 @@
         id<MTL4RenderCommandEncoder> renderEncoder =
             [_commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
 
-        [renderEncoder pushDebugGroup:@"DrawBox"];
-
         [renderEncoder setFrontFacingWinding:MTLWindingCounterClockwise];
         [renderEncoder setCullMode:MTLCullModeBack];
         [renderEncoder setRenderPipelineState:_pipelineState];
         [renderEncoder setDepthStencilState:_depthState];
 
-        [renderEncoder setArgumentTable:_argumentTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
-        [_argumentTable setAddress:_dynamicUniformBuffer[_uniformBufferIndex].gpuAddress atIndex:BufferIndexUniforms];
-        
-        for (NSUInteger bufferIndex = 0; bufferIndex < _mesh.vertexBuffers.count; bufferIndex++)
-        {
-            MTKMeshBuffer *vertexBuffer = _mesh.vertexBuffers[bufferIndex];
-            if((NSNull*)vertexBuffer != [NSNull null])
+        // Render all world meshes
+        for (NSUInteger i = 0; i < _world.meshCount; i++) {
+            WorldMesh worldMesh = _world.meshes[i];
+            MTKMesh *mesh = worldMesh.mesh;
+            
+            [renderEncoder pushDebugGroup:[NSString stringWithFormat:@"DrawWall%lu", i]];
+            
+            [renderEncoder setArgumentTable:_argumentTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+            [_argumentTable setAddress:_dynamicUniformBuffer[_uniformBufferIndex].gpuAddress atIndex:BufferIndexUniforms];
+            
+            for (NSUInteger bufferIndex = 0; bufferIndex < mesh.vertexBuffers.count; bufferIndex++)
             {
-                [_argumentTable setAddress:vertexBuffer.buffer.gpuAddress + vertexBuffer.offset atIndex:bufferIndex];
+                MTKMeshBuffer *vertexBuffer = mesh.vertexBuffers[bufferIndex];
+                if((NSNull*)vertexBuffer != [NSNull null])
+                {
+                    [_argumentTable setAddress:vertexBuffer.buffer.gpuAddress + vertexBuffer.offset atIndex:bufferIndex];
+                }
             }
-        }
-        [_argumentTable setTexture:_colorMap.gpuResourceID atIndex:TextureIndexColor];
-        
-        for(MTKSubmesh *submesh in _mesh.submeshes)
-        {
-            [renderEncoder drawIndexedPrimitives:submesh.primitiveType
-                                      indexCount:submesh.indexCount
-                                       indexType:submesh.indexType
-                                     indexBuffer:submesh.indexBuffer.buffer.gpuAddress + submesh.indexBuffer.offset
-                               indexBufferLength:submesh.indexBuffer.buffer.length - submesh.indexBuffer.offset];
+            [_argumentTable setTexture:_colorMap.gpuResourceID atIndex:TextureIndexColor];
+            
+            for(MTKSubmesh *submesh in mesh.submeshes)
+            {
+                [renderEncoder drawIndexedPrimitives:submesh.primitiveType
+                                           indexCount:submesh.indexCount
+                                            indexType:submesh.indexType
+                                          indexBuffer:submesh.indexBuffer.buffer.gpuAddress + submesh.indexBuffer.offset
+                                    indexBufferLength:submesh.indexBuffer.buffer.length - submesh.indexBuffer.offset];
+            }
+            
+            [renderEncoder popDebugGroup];
         }
 
 
-        [renderEncoder popDebugGroup];
 
         [renderEncoder endEncoding];
 
@@ -360,6 +379,34 @@ matrix_float4x4 matrix_perspective_right_hand(float fovyRadians, float aspect, f
         {  0,   0,         zs, -1 },
         {  0,   0, nearZ * zs,  0 }
     }};
+}
+
+- (void)handleKeyDown:(NSEvent *)event
+{
+    NSString *chars = [event characters];
+    if ([chars length] > 0) {
+        unsigned short keyCode = [chars characterAtIndex:0];
+        if (keyCode < 256) {
+            _keysPressed[keyCode] = YES;
+        }
+    }
+}
+
+- (void)handleKeyUp:(NSEvent *)event
+{
+    NSString *chars = [event characters];
+    if ([chars length] > 0) {
+        unsigned short keyCode = [chars characterAtIndex:0];
+        if (keyCode < 256) {
+            _keysPressed[keyCode] = NO;
+        }
+    }
+}
+
+- (void)handleMouseMove:(NSEvent *)event
+{
+    // Mouse delta could be calculated from event location
+    // This is a placeholder - the player update uses {0, 0} for mouse delta
 }
 
 @end
