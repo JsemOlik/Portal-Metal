@@ -160,3 +160,93 @@ AABB aabb_create_player(vector_float3 cameraPosition, float radius, float height
 
     return aabb_create(center, halfExtents);
 }
+
+Ray ray_create(vector_float3 origin, vector_float3 direction)
+{
+    return (Ray) {
+        .origin = origin,
+        .direction = simd_normalize(direction)
+    };
+}
+
+RayHitResult ray_intersect_aabb(Ray ray, AABB box, float maxDistance)
+{
+    RayHitResult result = {
+        .hit = NO,
+        .point = (vector_float3){0, 0, 0},
+        .normal = (vector_float3){0, 0, 0},
+        .distance = INFINITY,
+        .hitIndex = -1
+    };
+
+    // Use slab method for ray-AABB intersection
+    vector_float3 invDir = (vector_float3){
+        1.0f / ray.direction.x,
+        1.0f / ray.direction.y,
+        1.0f / ray.direction.z
+    };
+
+    vector_float3 t0 = (box.min - ray.origin) * invDir;
+    vector_float3 t1 = (box.max - ray.origin) * invDir;
+
+    vector_float3 tmin = simd_min(t0, t1);
+    vector_float3 tmax = simd_max(t0, t1);
+
+    float tNear = fmaxf(fmaxf(tmin.x, tmin.y), tmin.z);
+    float tFar = fminf(fminf(tmax.x, tmax.y), tmax.z);
+
+    // Check if ray intersects AABB
+    if (tNear > tFar || tFar < 0.0f || tNear > maxDistance) {
+        return result;
+    }
+
+    // We have a hit
+    result.hit = YES;
+    result.distance = tNear > 0.0f ? tNear : tFar;
+    result.point = ray.origin + ray.direction * result.distance;
+
+    // Calculate normal based on which face was hit
+    vector_float3 center = aabb_center(box);
+    vector_float3 hitRelative = result.point - center;
+    vector_float3 halfSize = (box.max - box.min) * 0.5f;
+
+    // Find which axis has the largest relative distance
+    vector_float3 normalized = (vector_float3){
+        hitRelative.x / halfSize.x,
+        hitRelative.y / halfSize.y,
+        hitRelative.z / halfSize.z
+    };
+
+    float maxComponent = fmaxf(fabsf(normalized.x), fmaxf(fabsf(normalized.y), fabsf(normalized.z)));
+
+    if (fabsf(normalized.x) >= maxComponent - 0.01f) {
+        result.normal = (vector_float3){normalized.x > 0 ? 1.0f : -1.0f, 0, 0};
+    } else if (fabsf(normalized.y) >= maxComponent - 0.01f) {
+        result.normal = (vector_float3){0, normalized.y > 0 ? 1.0f : -1.0f, 0};
+    } else {
+        result.normal = (vector_float3){0, 0, normalized.z > 0 ? 1.0f : -1.0f};
+    }
+
+    return result;
+}
+
+RayHitResult ray_intersect_world(Ray ray, AABB *boxes, NSUInteger count, float maxDistance)
+{
+    RayHitResult closestHit = {
+        .hit = NO,
+        .point = (vector_float3){0, 0, 0},
+        .normal = (vector_float3){0, 0, 0},
+        .distance = maxDistance,
+        .hitIndex = -1
+    };
+
+    for (NSUInteger i = 0; i < count; i++) {
+        RayHitResult hit = ray_intersect_aabb(ray, boxes[i], maxDistance);
+        if (hit.hit && hit.distance < closestHit.distance) {
+            closestHit = hit;
+            closestHit.hitIndex = (int)i;
+        }
+    }
+
+    return closestHit;
+}

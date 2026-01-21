@@ -76,8 +76,17 @@
 
 - (void)mouseDown:(NSEvent *)event
 {
-    // Click to focus and enable mouse capture
+    // Left click - shoot blue portal
+    [_renderer handleMouseClick:event isRightClick:NO];
+
+    // Also ensure window has focus
     [self.view.window makeFirstResponder:self];
+}
+
+- (void)rightMouseDown:(NSEvent *)event
+{
+    // Right click - shoot orange portal
+    [_renderer handleMouseClick:event isRightClick:YES];
 }
 
 - (BOOL)resignFirstResponder

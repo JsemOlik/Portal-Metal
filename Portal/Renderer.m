@@ -12,6 +12,7 @@
 #import "Player.h"
 #import "World.h"
 #import "Camera.h"
+#import "Portal.h"
 
 // Include header shared between C code here, which executes Metal API commands, and .metal files
 #import "ShaderTypes.h"
@@ -48,10 +49,11 @@
     // Game systems
     Player _player;
     World _world;
+    PortalPair _portals;
     CFTimeInterval _lastFrameTime;
 
-    // Input tracking
-    BOOL _keysPressed[256];
+    // Input tracking - using raw key codes for reliability
+    BOOL _keysPressed[128];  // Raw key codes (0-127)
     float _mouseDeltaX;
     float _mouseDeltaY;
     BOOL _mouseTrackingEnabled;
@@ -74,6 +76,9 @@
         // Create the world
         _world = world_create(_device, _mtlVertexDescriptor);
 
+        // Initialize portal system
+        _portals = portal_pair_create();
+
         // Initialize input tracking
         memset(_keysPressed, 0, sizeof(_keysPressed));
         _mouseDeltaX = 0.0f;
@@ -83,6 +88,7 @@
 
         NSLog(@"Player initialized at position: (%.2f, %.2f, %.2f)",
               _player.camera.position.x, _player.camera.position.y, _player.camera.position.z);
+        NSLog(@"Portal system initialized - Left click: Blue, Right click: Orange");
     }
 
     return self;
@@ -259,12 +265,13 @@
         deltaTime = 0.1;
     }
 
-    // Gather input
+    // Gather input using raw key codes
+    // Key codes: W=13, A=0, S=1, D=2
     float moveInput[3] = {0, 0, 0};
-    if (_keysPressed['w'] || _keysPressed['W']) moveInput[2] += 1.0f;
-    if (_keysPressed['s'] || _keysPressed['S']) moveInput[2] -= 1.0f;
-    if (_keysPressed['a'] || _keysPressed['A']) moveInput[0] -= 1.0f;
-    if (_keysPressed['d'] || _keysPressed['D']) moveInput[0] += 1.0f;
+    if (_keysPressed[13]) moveInput[2] += 1.0f;  // W
+    if (_keysPressed[1])  moveInput[2] -= 1.0f;  // S
+    if (_keysPressed[0])  moveInput[0] -= 1.0f;  // A
+    if (_keysPressed[2])  moveInput[0] += 1.0f;  // D
 
     float mouseDelta[2] = {_mouseDeltaX, _mouseDeltaY};
 
@@ -425,8 +432,10 @@ matrix_float4x4 matrix_perspective_right_hand(float fovyRadians, float aspect, f
 
 - (void)handleKeyDown:(NSEvent *)event
 {
+    unsigned short keyCode = [event keyCode];
+
     // Handle ESC key to release mouse
-    if ([event keyCode] == 53) { // ESC key code
+    if (keyCode == 53) { // ESC
         if (_mouseTrackingEnabled) {
             _mouseTrackingEnabled = NO;
             [NSCursor unhide];
@@ -435,12 +444,16 @@ matrix_float4x4 matrix_perspective_right_hand(float fovyRadians, float aspect, f
         return;
     }
 
-    NSString *chars = [event characters];
-    if ([chars length] > 0) {
-        unsigned short keyCode = [chars characterAtIndex:0];
-        if (keyCode < 256) {
-            _keysPressed[keyCode] = YES;
-        }
+    // Handle Q key to clear all stuck keys (emergency fix)
+    if (keyCode == 12) { // Q
+        memset(_keysPressed, 0, sizeof(_keysPressed));
+        NSLog(@"Cleared all key states (Q pressed)");
+        return;
+    }
+
+    // Set key state using raw key code
+    if (keyCode < 128) {
+        _keysPressed[keyCode] = YES;
     }
 
     // Enable mouse tracking on first key press
@@ -453,12 +466,11 @@ matrix_float4x4 matrix_perspective_right_hand(float fovyRadians, float aspect, f
 
 - (void)handleKeyUp:(NSEvent *)event
 {
-    NSString *chars = [event characters];
-    if ([chars length] > 0) {
-        unsigned short keyCode = [chars characterAtIndex:0];
-        if (keyCode < 256) {
-            _keysPressed[keyCode] = NO;
-        }
+    unsigned short keyCode = [event keyCode];
+
+    // Clear key state using raw key code
+    if (keyCode < 128) {
+        _keysPressed[keyCode] = NO;
     }
 }
 
@@ -473,6 +485,41 @@ matrix_float4x4 matrix_perspective_right_hand(float fovyRadians, float aspect, f
     if (_mouseTrackingEnabled) {
         _mouseDeltaX += [event deltaX];
         _mouseDeltaY -= [event deltaY]; // Invert Y for natural camera movement
+    }
+}
+
+- (void)handleMouseClick:(NSEvent *)event isRightClick:(BOOL)isRightClick
+{
+    // Shoot portal on mouse click
+    PortalColor color = isRightClick ? PortalColorOrange : PortalColorBlue;
+
+    // Create ray from camera
+    vector_float3 forward = camera_forward(_player.camera);
+    Ray ray = ray_create(_player.camera.position, forward);
+
+    // Get world collision boxes
+    NSUInteger collisionBoxCount = 0;
+    AABB *collisionBoxes = world_get_collision_boxes(&_world, &collisionBoxCount);
+
+    // Ray cast to find surface
+    RayHitResult hit = ray_intersect_world(ray, collisionBoxes, collisionBoxCount, 100.0f);
+
+    if (hit.hit) {
+        // Place portal at hit location
+        // Offset slightly from surface to prevent z-fighting
+        vector_float3 portalPosition = hit.point + hit.normal * 0.01f;
+
+        portal_pair_place(&_portals, color, portalPosition, hit.normal);
+
+        NSLog(@"Placed %@ portal at (%.2f, %.2f, %.2f)",
+              color == PortalColorBlue ? @"BLUE" : @"ORANGE",
+              portalPosition.x, portalPosition.y, portalPosition.z);
+
+        if (portal_pair_is_linked(&_portals)) {
+            NSLog(@"Portals are now LINKED!");
+        }
+    } else {
+        NSLog(@"No surface hit - can't place portal");
     }
 }
 

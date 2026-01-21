@@ -61,4 +61,27 @@ vector_float3 aabb_size(AABB box);
 // Player is a capsule approximated as AABB with radius and height
 AABB aabb_create_player(vector_float3 cameraPosition, float radius, float height);
 
+// Ray casting
+typedef struct {
+    vector_float3 origin;
+    vector_float3 direction;  // Should be normalized
+} Ray;
+
+typedef struct {
+    BOOL hit;
+    vector_float3 point;       // Hit point in world space
+    vector_float3 normal;      // Surface normal at hit point
+    float distance;            // Distance from ray origin to hit point
+    int hitIndex;              // Index of hit object (-1 if none)
+} RayHitResult;
+
+// Create a ray from origin and direction
+Ray ray_create(vector_float3 origin, vector_float3 direction);
+
+// Test ray against AABB
+RayHitResult ray_intersect_aabb(Ray ray, AABB box, float maxDistance);
+
+// Test ray against multiple AABBs, return closest hit
+RayHitResult ray_intersect_world(Ray ray, AABB *boxes, NSUInteger count, float maxDistance);
+
 #endif /* Collision_h */

@@ -17,6 +17,7 @@
 - (void)handleKeyDown:(nonnull NSEvent *)event;
 - (void)handleKeyUp:(nonnull NSEvent *)event;
 - (void)handleMouseMove:(nonnull NSEvent *)event;
+- (void)handleMouseClick:(nonnull NSEvent *)event isRightClick:(BOOL)isRightClick;
 - (void)handleFocusLost;
 
 @end
