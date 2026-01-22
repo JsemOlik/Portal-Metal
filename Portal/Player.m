@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #import <simd/simd.h>
 #import "Player.h"
+#import "Portal.h"
 
 Player player_create(vector_float3 startPosition)
 {
@@ -19,7 +20,8 @@ Player player_create(vector_float3 startPosition)
         .onGround = YES,
         .gravity = -20.0f,
         .radius = 0.4f,
-        .height = 1.8f
+        .height = 1.8f,
+        .jumpStrength = 8.0f
     };
 }
 
@@ -28,7 +30,7 @@ AABB player_get_collision_box(Player *player)
     return aabb_create_player(player->camera.position, player->radius, player->height);
 }
 
-void player_update(Player *player, float deltaTime, float moveInput[3], float mouseDelta[2], AABB *collisionBoxes, NSUInteger collisionBoxCount)
+void player_update(Player *player, float deltaTime, float moveInput[3], float mouseDelta[2], BOOL jump, AABB *collisionBoxes, NSUInteger collisionBoxCount, PortalPair *portals)
 {
     // Update camera rotation from mouse
     player->camera.yaw += mouseDelta[0] * player->mouseSensitivity;
@@ -62,6 +64,11 @@ void player_update(Player *player, float deltaTime, float moveInput[3], float mo
     vector_float3 moveVelocity = moveDir * player->moveSpeed;
     moveVelocity.y = player->velocity.y; // preserve vertical velocity
     player->velocity = moveVelocity;
+
+    // Handle jumping
+    if (jump && player->onGround) {
+        player_jump(player);
+    }
 
     // Apply gravity
     player_apply_gravity(player, deltaTime);
@@ -107,6 +114,36 @@ void player_update(Player *player, float deltaTime, float moveInput[3], float mo
 
     player->camera.position = finalPosition;
 
+    // Check for portal teleportation
+    if (portals && portal_pair_is_linked(portals)) {
+        // Check if player is entering blue portal
+        if (portals->blue.active && portal_contains_point(&portals->blue, player->camera.position)) {
+            // Teleport through blue to orange
+            vector_float3 newVelocity = player->velocity;
+            player->camera.position = portal_calculate_exit_position(&portals->blue, &portals->orange,
+                                                                     player->camera.position, &newVelocity);
+            player->velocity = newVelocity;
+
+            // Update camera orientation
+            portal_calculate_exit_rotation(&portals->blue, &portals->orange, &player->camera.pitch, &player->camera.yaw);
+
+            NSLog(@"Teleported through BLUE portal!");
+        }
+        // Check if player is entering orange portal
+        else if (portals->orange.active && portal_contains_point(&portals->orange, player->camera.position)) {
+            // Teleport through orange to blue
+            vector_float3 newVelocity = player->velocity;
+            player->camera.position = portal_calculate_exit_position(&portals->orange, &portals->blue,
+                                                                     player->camera.position, &newVelocity);
+            player->velocity = newVelocity;
+
+            // Update camera orientation
+            portal_calculate_exit_rotation(&portals->orange, &portals->blue, &player->camera.pitch, &player->camera.yaw);
+
+            NSLog(@"Teleported through ORANGE portal!");
+        }
+    }
+
     // Check if on ground (feet touching floor)
     float playerFootY = player->camera.position.y - player->height;
     float groundY = -9.75f;
@@ -125,4 +162,12 @@ void player_update(Player *player, float deltaTime, float moveInput[3], float mo
 void player_apply_gravity(Player *player, float deltaTime)
 {
     player->velocity.y += player->gravity * deltaTime;
+}
+
+void player_jump(Player *player)
+{
+    if (player->onGround) {
+        player->velocity.y = player->jumpStrength;
+        player->onGround = NO;
+    }
 }

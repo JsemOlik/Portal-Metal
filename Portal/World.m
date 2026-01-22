@@ -46,6 +46,9 @@ World world_create(id<MTLDevice> device, MTLVertexDescriptor *vertexDescriptor)
     world.collisionBoxCount = 7;
     world.collisionBoxes = malloc(sizeof(AABB) * world.collisionBoxCount);
 
+    // Create shared portal mesh (oval with 32 segments)
+    world.portalMesh = world_create_portal_mesh(device, vertexDescriptor, 2.0f, 3.0f, 32);
+
     // Floor (y = -10)
     world.meshes[0] = (WorldMesh) {
         .mesh = create_cube_mesh(device, (vector_float3){40, 0.5, 40}, vertexDescriptor),
@@ -126,4 +129,11 @@ AABB* world_get_collision_boxes(World *world, NSUInteger *outCount)
         *outCount = world->collisionBoxCount;
     }
     return world->collisionBoxes;
+}
+
+MTKMesh* world_create_portal_mesh(id<MTLDevice> device, MTLVertexDescriptor *vertexDescriptor, float width, float height, int segments)
+{
+    // For now, create a simple flat quad for the portal
+    // This will be rendered with a shader that creates the oval effect
+    return create_cube_mesh(device, (vector_float3){width, height, 0.01}, vertexDescriptor);
 }

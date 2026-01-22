@@ -12,6 +12,7 @@
 #import <simd/simd.h>
 #import "Camera.h"
 #import "Collision.h"
+#import "Portal.h"
 
 typedef struct {
     Camera camera;
@@ -22,11 +23,13 @@ typedef struct {
     float gravity;
     float radius;       // Player collision radius
     float height;       // Player height (eye level)
+    float jumpStrength; // Jump velocity
 } Player;
 
 Player player_create(vector_float3 startPosition);
-void player_update(Player *player, float deltaTime, float moveInput[3], float mouseDelta[2], AABB *collisionBoxes, NSUInteger collisionBoxCount);
+void player_update(Player *player, float deltaTime, float moveInput[3], float mouseDelta[2], BOOL jump, AABB *collisionBoxes, NSUInteger collisionBoxCount, PortalPair *portals);
 void player_apply_gravity(Player *player, float deltaTime);
+void player_jump(Player *player);
 AABB player_get_collision_box(Player *player);
 
 #endif /* Player_h */

@@ -11,6 +11,9 @@
 
 Portal portal_create(PortalColor color, vector_float3 position, vector_float3 normal)
 {
+    NSLog(@"portal_create called: color=%d, position=(%.2f, %.2f, %.2f)",
+          color, position.x, position.y, position.z);
+
     // Normalize the normal vector
     normal = simd_normalize(normal);
 
@@ -38,6 +41,8 @@ Portal portal_create(PortalColor color, vector_float3 position, vector_float3 no
     };
 
     portal_update_transform(&portal);
+
+    NSLog(@"portal_create finished: active=%d", portal.active);
 
     return portal;
 }
@@ -85,13 +90,22 @@ BOOL portal_contains_point(Portal *portal, vector_float3 point)
 
     // Project onto portal plane
     float distanceToPlane = simd_dot(localPoint, portal->normal);
-    if (fabsf(distanceToPlane) > 0.1f) return NO; // Too far from portal plane
+
+    // Increased threshold for easier teleportation
+    if (fabsf(distanceToPlane) > 0.5f) return NO; // Too far from portal plane
 
     // Check if within portal bounds
     float rightDist = fabsf(simd_dot(localPoint, portal->right));
     float upDist = fabsf(simd_dot(localPoint, portal->up));
 
-    return (rightDist <= portal->width * 0.5f && upDist <= portal->height * 0.5f);
+    BOOL isInside = (rightDist <= portal->width * 0.5f && upDist <= portal->height * 0.5f);
+
+    if (isInside) {
+        NSLog(@"Player inside portal! distToPlane: %.2f, rightDist: %.2f, upDist: %.2f",
+              distanceToPlane, rightDist, upDist);
+    }
+
+    return isInside;
 }
 
 PortalPair portal_pair_create(void)
@@ -106,14 +120,21 @@ PortalPair portal_pair_create(void)
 
 void portal_pair_place(PortalPair *pair, PortalColor color, vector_float3 position, vector_float3 normal)
 {
+    NSLog(@"portal_pair_place called: color=%d (%@)", color, color == PortalColorBlue ? @"BLUE" : @"ORANGE");
+
     if (color == PortalColorBlue) {
         pair->blue = portal_create(PortalColorBlue, position, normal);
+        NSLog(@"After placing BLUE: active=%d", pair->blue.active);
     } else {
         pair->orange = portal_create(PortalColorOrange, position, normal);
+        NSLog(@"After placing ORANGE: active=%d", pair->orange.active);
     }
 
     // Update linked status
     pair->linked = pair->blue.active && pair->orange.active;
+
+    NSLog(@"portal_pair_place finished: blue.active=%d, orange.active=%d, linked=%d",
+          pair->blue.active, pair->orange.active, pair->linked);
 }
 
 BOOL portal_pair_is_linked(PortalPair *pair)

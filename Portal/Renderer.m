@@ -28,6 +28,7 @@
     id <MTLBuffer> _dynamicUniformBuffer[MaxBuffersInFlight];
     id <MTLBuffer> _perObjectUniformBuffers[MaxBuffersInFlight][8]; // 8 meshes max (room for expansion)
     id <MTLRenderPipelineState> _pipelineState;
+    id <MTLRenderPipelineState> _portalPipelineState;
     id <MTLDepthStencilState> _depthState;
     id <MTLTexture> _colorMap;
     MTLVertexDescriptor *_mtlVertexDescriptor;
@@ -150,6 +151,29 @@
         NSLog(@"Failed to created pipeline state, error %@", error);
     }
 
+    // Create portal pipeline with alpha blending
+    MTL4LibraryFunctionDescriptor *portalFragmentFunction = [MTL4LibraryFunctionDescriptor new];
+    portalFragmentFunction.library = defaultLibrary;
+    portalFragmentFunction.name = @"portalFragmentShader";
+
+    MTL4RenderPipelineDescriptor *portalPipelineDesc = [MTL4RenderPipelineDescriptor new];
+    portalPipelineDesc.label = @"PortalPipeline";
+    portalPipelineDesc.rasterSampleCount = view.sampleCount;
+    portalPipelineDesc.vertexFunctionDescriptor = vertexFunction;
+    portalPipelineDesc.fragmentFunctionDescriptor = portalFragmentFunction;
+    portalPipelineDesc.vertexDescriptor = _mtlVertexDescriptor;
+    portalPipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+    // TODO: Add alpha blending once we figure out Metal 4 API
+
+    _portalPipelineState = [compiler newRenderPipelineStateWithDescriptor:portalPipelineDesc
+                                                       compilerTaskOptions:nil
+                                                                     error:&error];
+
+    if (!_portalPipelineState)
+    {
+        NSLog(@"Failed to create portal pipeline state, error %@", error);
+    }
+
     MTLDepthStencilDescriptor *depthStateDesc = [[MTLDepthStencilDescriptor alloc] init];
     depthStateDesc.depthCompareFunction = MTLCompareFunctionLess;
     depthStateDesc.depthWriteEnabled = YES;
@@ -266,12 +290,14 @@
     }
 
     // Gather input using raw key codes
-    // Key codes: W=13, A=0, S=1, D=2
+    // Key codes: W=13, A=0, S=1, D=2, Space=49
     float moveInput[3] = {0, 0, 0};
     if (_keysPressed[13]) moveInput[2] += 1.0f;  // W
     if (_keysPressed[1])  moveInput[2] -= 1.0f;  // S
     if (_keysPressed[0])  moveInput[0] -= 1.0f;  // A
     if (_keysPressed[2])  moveInput[0] += 1.0f;  // D
+
+    BOOL jump = _keysPressed[49];  // Space bar
 
     float mouseDelta[2] = {_mouseDeltaX, _mouseDeltaY};
 
@@ -283,8 +309,8 @@
     NSUInteger collisionBoxCount = 0;
     AABB *collisionBoxes = world_get_collision_boxes(&_world, &collisionBoxCount);
 
-    // Update player with collision detection
-    player_update(&_player, (float)deltaTime, moveInput, mouseDelta, collisionBoxes, collisionBoxCount);
+    // Update player with collision detection and portal teleportation
+    player_update(&_player, (float)deltaTime, moveInput, mouseDelta, jump, collisionBoxes, collisionBoxCount, &_portals);
 
     // Update uniforms for all meshes
     matrix_float4x4 viewMatrix = camera_view_matrix(_player.camera);
@@ -360,7 +386,19 @@
             [renderEncoder popDebugGroup];
         }
 
+        // Render active portals (render both if active)
+        NSLog(@"=== Portal Rendering ===");
+        NSLog(@"Blue active: %d, Orange active: %d, Linked: %d",
+              _portals.blue.active, _portals.orange.active, _portals.linked);
 
+        // TEMPORARY: Force render both portals for debugging
+        NSLog(@"Rendering BLUE portal at (%.2f, %.2f, %.2f)",
+              _portals.blue.position.x, _portals.blue.position.y, _portals.blue.position.z);
+        [self renderPortal:&_portals.blue withEncoder:renderEncoder];
+
+        NSLog(@"Rendering ORANGE portal at (%.2f, %.2f, %.2f)",
+              _portals.orange.position.x, _portals.orange.position.y, _portals.orange.position.z);
+        [self renderPortal:&_portals.orange withEncoder:renderEncoder];
 
         [renderEncoder endEncoding];
 
@@ -521,6 +559,79 @@ matrix_float4x4 matrix_perspective_right_hand(float fovyRadians, float aspect, f
     } else {
         NSLog(@"No surface hit - can't place portal");
     }
+}
+
+- (void)renderPortal:(Portal *)portal withEncoder:(id<MTL4RenderCommandEncoder>)renderEncoder
+{
+    // TEMPORARY: Comment out active check for debugging
+    // if (!portal->active) {
+    //     NSLog(@"Portal not active, skipping render");
+    //     return;
+    // }
+
+    NSString *colorName = portal->color == PortalColorBlue ? @"Blue" : @"Orange";
+    NSLog(@"renderPortal called for %@ portal", colorName);
+
+    [renderEncoder pushDebugGroup:[NSString stringWithFormat:@"Portal_%@", colorName]];
+
+    // Switch to portal pipeline
+    [renderEncoder setRenderPipelineState:_portalPipelineState];
+    [renderEncoder setCullMode:MTLCullModeNone]; // Render both sides
+
+    // Set up uniforms for portal
+    Uniforms uniforms;
+    uniforms.projectionMatrix = _projectionMatrix;
+    uniforms.viewMatrix = camera_view_matrix(_player.camera);
+    uniforms.modelMatrix = portal->transform;
+
+    // Use last component of model matrix to pass portal color (0=blue, 1=orange)
+    float colorFlag = portal->color == PortalColorOrange ? 1.0f : 0.0f;
+    uniforms.modelMatrix.columns[3][3] = colorFlag;
+
+    NSLog(@"Portal color: %@, colorFlag: %.2f", colorName, colorFlag);
+
+    // Create temporary buffer for portal uniforms
+    id<MTLBuffer> portalUniformBuffer = [_device newBufferWithBytes:&uniforms
+                                                              length:sizeof(Uniforms)
+                                                             options:MTLResourceStorageModeShared];
+
+    [renderEncoder setArgumentTable:_argumentTable atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+    [_argumentTable setAddress:portalUniformBuffer.gpuAddress atIndex:BufferIndexUniforms];
+
+    // Get portal mesh from world
+    MTKMesh *portalMesh = _world.portalMesh;
+    if (!portalMesh) {
+        NSLog(@"ERROR: Portal mesh is NULL!");
+        [renderEncoder popDebugGroup];
+        return;
+    }
+
+    NSLog(@"Portal mesh vertex buffers: %lu", (unsigned long)portalMesh.vertexBuffers.count);
+
+    // Set vertex buffers
+    for (NSUInteger bufferIndex = 0; bufferIndex < portalMesh.vertexBuffers.count; bufferIndex++)
+    {
+        MTKMeshBuffer *vertexBuffer = portalMesh.vertexBuffers[bufferIndex];
+        if((NSNull*)vertexBuffer != [NSNull null])
+        {
+            [_argumentTable setAddress:vertexBuffer.buffer.gpuAddress + vertexBuffer.offset atIndex:bufferIndex];
+        }
+    }
+
+    // Draw portal mesh
+    NSLog(@"Drawing portal with %lu submeshes", (unsigned long)portalMesh.submeshes.count);
+    for(MTKSubmesh *submesh in portalMesh.submeshes)
+    {
+        NSLog(@"Drawing submesh with %lu indices", (unsigned long)submesh.indexCount);
+        [renderEncoder drawIndexedPrimitives:submesh.primitiveType
+                                   indexCount:submesh.indexCount
+                                    indexType:submesh.indexType
+                                  indexBuffer:submesh.indexBuffer.buffer.gpuAddress + submesh.indexBuffer.offset
+                            indexBufferLength:submesh.indexBuffer.buffer.length - submesh.indexBuffer.offset];
+    }
+
+    NSLog(@"Finished rendering %@ portal", colorName);
+    [renderEncoder popDebugGroup];
 }
 
 @end
